@@ -1,0 +1,568 @@
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use anstyle::{AnsiColor, Effects, Style};
+use chrono::{Local, NaiveDate};
+use rusqlite::{Connection, params};
+
+use crate::Result;
+use crate::config::TitleGroupingConfig;
+use crate::storage::open_database;
+
+#[derive(Debug, Clone, Copy)]
+pub struct TimeRange {
+    pub start: i64,
+    pub end: i64,
+    pub since: NaiveDate,
+    pub until: NaiveDate,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AppUsage {
+    app_id: String,
+    seconds: i64,
+    titles: Vec<TitleUsage>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TitleUsage {
+    title: Option<String>,
+    seconds: i64,
+}
+
+pub fn print_report(
+    path: &Path,
+    range: TimeRange,
+    tree: bool,
+    group_titles: bool,
+    no_ansi: bool,
+    title_grouping_config: &TitleGroupingConfig,
+) -> Result<()> {
+    let connection = open_database(path)?;
+    let usage = load_usage(
+        &connection,
+        range,
+        tree,
+        group_titles,
+        title_grouping_config,
+    )?;
+    let total_usage = usage.iter().map(|app| app.seconds).sum();
+    let selected_elapsed = selected_elapsed_seconds(range, Local::now().timestamp());
+    let styles = ReportStyles { ansi: !no_ansi };
+
+    let heading = if range.since == range.until {
+        format!(
+            "Usage report for {} ({}/{})",
+            range.since,
+            format_duration(total_usage),
+            format_duration(selected_elapsed)
+        )
+    } else {
+        format!(
+            "Usage report from {} through {} ({}/{})",
+            range.since,
+            range.until,
+            format_duration(total_usage),
+            format_duration(selected_elapsed)
+        )
+    };
+    println!("{}", styles.header(&heading));
+
+    if usage.is_empty() {
+        println!("{}", styles.muted("No completed active intervals."));
+        return Ok(());
+    }
+
+    for app in usage {
+        println!(
+            "{}  {}",
+            styles.application(&app.app_id),
+            styles.duration(&format_duration(app.seconds))
+        );
+        if tree {
+            let title_count = app.titles.len();
+            for (index, title) in app.titles.into_iter().enumerate() {
+                let branch = if index + 1 == title_count {
+                    "└─"
+                } else {
+                    "├─"
+                };
+                let title_label = format_title(title.title.as_deref());
+                println!(
+                    "  {} {}  {}",
+                    styles.branch(branch),
+                    styles.title(&title_label),
+                    styles.duration(&format_duration(title.seconds))
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ReportStyles {
+    ansi: bool,
+}
+
+impl ReportStyles {
+    fn header(&self, text: &str) -> String {
+        self.paint(
+            text,
+            Style::new()
+                .fg_color(Some(AnsiColor::BrightCyan.into()))
+                .effects(Effects::BOLD),
+        )
+    }
+
+    fn application(&self, text: &str) -> String {
+        self.paint(
+            text,
+            Style::new()
+                .fg_color(Some(AnsiColor::BrightGreen.into()))
+                .effects(Effects::BOLD),
+        )
+    }
+
+    fn branch(&self, text: &str) -> String {
+        self.paint(
+            text,
+            Style::new().fg_color(Some(AnsiColor::BrightBlack.into())),
+        )
+    }
+
+    fn title(&self, text: &str) -> String {
+        self.paint(
+            text,
+            Style::new().fg_color(Some(AnsiColor::BrightYellow.into())),
+        )
+    }
+
+    fn duration(&self, text: &str) -> String {
+        self.paint(text, Style::new().effects(Effects::DIMMED))
+    }
+
+    fn muted(&self, text: &str) -> String {
+        self.paint(
+            text,
+            Style::new().fg_color(Some(AnsiColor::BrightBlack.into())),
+        )
+    }
+
+    fn paint(&self, text: &str, style: Style) -> String {
+        if self.ansi {
+            format!("{style}{text}{style:#}")
+        } else {
+            text.to_owned()
+        }
+    }
+}
+
+fn load_usage(
+    connection: &Connection,
+    range: TimeRange,
+    tree: bool,
+    group_titles: bool,
+    title_grouping_config: &TitleGroupingConfig,
+) -> Result<Vec<AppUsage>> {
+    let mut statement = connection.prepare(
+        "SELECT app_id,
+                SUM(MIN(ended_at, ?2) - MAX(started_at, ?1)) AS seconds
+         FROM activity_interval
+         WHERE state = 'active' AND ended_at > ?1 AND started_at < ?2
+         GROUP BY app_id
+         ORDER BY seconds DESC, app_id",
+    )?;
+    let apps = statement
+        .query_map(params![range.start, range.end], |row| {
+            Ok(AppUsage {
+                app_id: row.get(0)?,
+                seconds: row.get(1)?,
+                titles: Vec::new(),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    if !tree {
+        return Ok(apps);
+    }
+
+    apps.into_iter()
+        .map(|mut app| {
+            app.titles = load_title_usage(connection, range, &app.app_id)?;
+            if group_titles {
+                app.titles = group_title_usage(&app.app_id, app.titles, title_grouping_config);
+            }
+            Ok(app)
+        })
+        .collect()
+}
+
+fn group_title_usage(
+    app_id: &str,
+    titles: Vec<TitleUsage>,
+    title_grouping_config: &TitleGroupingConfig,
+) -> Vec<TitleUsage> {
+    let mut groups: BTreeMap<Option<String>, TitleGroup> = BTreeMap::new();
+    for title in titles {
+        let key = normalized_title_key(app_id, title.title.as_deref(), title_grouping_config);
+        let group = groups.entry(key).or_insert_with(|| TitleGroup {
+            seconds: 0,
+            label: title.title.clone(),
+            label_seconds: title.seconds,
+        });
+        if title.seconds > group.label_seconds
+            || (title.seconds == group.label_seconds && title.title < group.label)
+        {
+            group.label = title.title.clone();
+            group.label_seconds = title.seconds;
+        }
+        group.seconds += title.seconds;
+    }
+
+    let mut grouped: Vec<_> = groups
+        .into_values()
+        .map(|group| TitleUsage {
+            title: group.label,
+            seconds: group.seconds,
+        })
+        .collect();
+    grouped.sort_by(|left, right| {
+        right
+            .seconds
+            .cmp(&left.seconds)
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    grouped
+}
+
+struct TitleGroup {
+    seconds: i64,
+    label: Option<String>,
+    label_seconds: i64,
+}
+
+fn normalized_title_key(
+    app_id: &str,
+    title: Option<&str>,
+    title_grouping_config: &TitleGroupingConfig,
+) -> Option<String> {
+    title.map(|title| title_grouping_config.normalize_title(app_id, title))
+}
+
+fn load_title_usage(
+    connection: &Connection,
+    range: TimeRange,
+    app_id: &str,
+) -> Result<Vec<TitleUsage>> {
+    let mut statement = connection.prepare(
+        "SELECT title,
+                SUM(MIN(segment_end, ?2) - MAX(segment_start, ?1)) AS seconds
+         FROM activity_title_segment
+         WHERE app_id = ?3 AND segment_end > ?1 AND segment_start < ?2
+         GROUP BY title
+         ORDER BY seconds DESC, title",
+    )?;
+    Ok(statement
+        .query_map(params![range.start, range.end, app_id], |row| {
+            Ok(TitleUsage {
+                title: row.get(0)?,
+                seconds: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn format_duration(seconds: i64) -> String {
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    match (hours, minutes) {
+        (0, 0) => format!("{seconds}s"),
+        (0, _) => format!("{minutes}m {seconds:02}s"),
+        _ => format!("{hours}h {minutes:02}m {seconds:02}s"),
+    }
+}
+
+fn selected_elapsed_seconds(range: TimeRange, now: i64) -> i64 {
+    range.end.min(now).saturating_sub(range.start).max(0)
+}
+
+fn format_title(title: Option<&str>) -> String {
+    format!("\"{}\"", title.unwrap_or("<untitled>").replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_clips_app_and_title_segments_to_the_requested_range() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE activity_interval (
+                 id INTEGER PRIMARY KEY, state TEXT NOT NULL, app_id TEXT NOT NULL,
+                 started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL
+             );
+             CREATE TABLE window_metadata_change (
+                 id INTEGER PRIMARY KEY, interval_id INTEGER NOT NULL, observed_at INTEGER NOT NULL,
+                 title TEXT, app_id TEXT NOT NULL
+             );
+             CREATE VIEW activity_title_segment AS
+             WITH points AS (
+                 SELECT id AS interval_id, app_id, 'first' AS title, started_at AS segment_start,
+                        ended_at AS interval_end, 0 AS point_order FROM activity_interval
+                 UNION ALL
+                 SELECT m.interval_id, m.app_id, m.title, m.observed_at, i.ended_at, m.id
+                 FROM window_metadata_change AS m JOIN activity_interval AS i ON i.id = m.interval_id
+             )
+             SELECT interval_id, app_id, title, segment_start,
+                    LEAD(segment_start, 1, interval_end) OVER (
+                        PARTITION BY interval_id ORDER BY segment_start, point_order
+                    ) AS segment_end
+             FROM points;
+             INSERT INTO activity_interval VALUES (1, 'active', 'Example', 0, 20);
+             INSERT INTO window_metadata_change VALUES (1, 1, 10, 'second', 'Example');",
+        )?;
+        let range = TimeRange {
+            start: 5,
+            end: 15,
+            since: NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            until: NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+        };
+
+        let config = TitleGroupingConfig::built_in();
+        let usage = load_usage(&connection, range, true, false, &config)?;
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].seconds, 10);
+        assert_eq!(
+            usage[0].titles,
+            vec![
+                TitleUsage {
+                    title: Some("first".into()),
+                    seconds: 5
+                },
+                TitleUsage {
+                    title: Some("second".into()),
+                    seconds: 5
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn duration_format_is_compact() {
+        assert_eq!(format_duration(5), "5s");
+        assert_eq!(format_duration(65), "1m 05s");
+        assert_eq!(format_duration(3_665), "1h 01m 05s");
+    }
+
+    #[test]
+    fn selected_elapsed_time_stops_at_now() {
+        let range = TimeRange {
+            start: 1_000,
+            end: 2_000,
+            since: NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            until: NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+        };
+        assert_eq!(selected_elapsed_seconds(range, 1_250), 250);
+        assert_eq!(selected_elapsed_seconds(range, 3_000), 1_000);
+        assert_eq!(selected_elapsed_seconds(range, 500), 0);
+    }
+
+    #[test]
+    fn title_output_keeps_unicode_format_characters() {
+        assert_eq!(format_title(Some("\u{200e}example")), "\"\u{200e}example\"");
+    }
+
+    #[test]
+    fn no_ansi_style_preserves_plain_text() {
+        let styles = ReportStyles { ansi: false };
+        assert_eq!(styles.header("Report"), "Report");
+        assert_eq!(styles.application("Example"), "Example");
+    }
+
+    #[test]
+    fn ansi_style_wraps_text_in_escape_sequences() {
+        let rendered = ReportStyles { ansi: true }.header("Report");
+        assert!(rendered.starts_with("\x1b["));
+        assert!(rendered.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn grouping_merges_only_formatting_equivalent_titles() {
+        let config = TitleGroupingConfig::built_in();
+        let grouped = group_title_usage(
+            "Example",
+            vec![
+                TitleUsage {
+                    title: Some("\u{200e}Quarterly   “Review”".into()),
+                    seconds: 5,
+                },
+                TitleUsage {
+                    title: Some("quarterly \"review\"".into()),
+                    seconds: 12,
+                },
+                TitleUsage {
+                    title: Some("Quarterly Review 2025".into()),
+                    seconds: 7,
+                },
+            ],
+            &config,
+        );
+        assert_eq!(
+            grouped,
+            vec![
+                TitleUsage {
+                    title: Some("quarterly \"review\"".into()),
+                    seconds: 17,
+                },
+                TitleUsage {
+                    title: Some("Quarterly Review 2025".into()),
+                    seconds: 7,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn grouping_uses_a_stable_label_when_durations_tie() {
+        let config = TitleGroupingConfig::built_in();
+        let grouped = group_title_usage(
+            "Example",
+            vec![
+                TitleUsage {
+                    title: Some("alpha".into()),
+                    seconds: 5,
+                },
+                TitleUsage {
+                    title: Some("Alpha".into()),
+                    seconds: 5,
+                },
+                TitleUsage {
+                    title: None,
+                    seconds: 3,
+                },
+            ],
+            &config,
+        );
+        assert_eq!(
+            grouped,
+            vec![
+                TitleUsage {
+                    title: Some("Alpha".into()),
+                    seconds: 10,
+                },
+                TitleUsage {
+                    title: None,
+                    seconds: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_notification_counters_merge_without_affecting_other_apps() {
+        let config = TitleGroupingConfig::built_in();
+        let browser = group_title_usage(
+            "Firefox",
+            vec![
+                TitleUsage {
+                    title: Some("(33) Pinterest — Mozilla Firefox".into()),
+                    seconds: 3,
+                },
+                TitleUsage {
+                    title: Some("(32) Pinterest — Mozilla Firefox".into()),
+                    seconds: 7,
+                },
+                TitleUsage {
+                    title: Some("Pinterest — Mozilla Firefox".into()),
+                    seconds: 2,
+                },
+                TitleUsage {
+                    title: Some("Яндекс Мессенджер — 31 новое сообщение - Chromium".into()),
+                    seconds: 4,
+                },
+                TitleUsage {
+                    title: Some("Яндекс Мессенджер — 33 новых сообщения - Chromium".into()),
+                    seconds: 5,
+                },
+            ],
+            &config,
+        );
+        assert_eq!(browser[0].seconds, 12);
+        assert_eq!(browser[1].seconds, 9);
+
+        let spotify = group_title_usage(
+            "Spotify",
+            vec![
+                TitleUsage {
+                    title: Some("Track (1)".into()),
+                    seconds: 3,
+                },
+                TitleUsage {
+                    title: Some("Track (2)".into()),
+                    seconds: 5,
+                },
+            ],
+            &config,
+        );
+        assert_eq!(spotify.len(), 2);
+    }
+
+    #[test]
+    fn telegram_and_terminal_volatile_state_is_grouped() {
+        let config = TitleGroupingConfig::built_in();
+        let telegram = group_title_usage(
+            "TelegramDesktop",
+            vec![
+                TitleUsage {
+                    title: Some("Жена – (946)".into()),
+                    seconds: 4,
+                },
+                TitleUsage {
+                    title: Some("(1) Жена – (947)".into()),
+                    seconds: 6,
+                },
+                TitleUsage {
+                    title: Some("Жена – (948)".into()),
+                    seconds: 2,
+                },
+            ],
+            &config,
+        );
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].seconds, 12);
+
+        let terminal = group_title_usage(
+            "Alacritty",
+            vec![
+                TitleUsage {
+                    title: Some("⠸ rxtt".into()),
+                    seconds: 4,
+                },
+                TitleUsage {
+                    title: Some("⠋ rxtt".into()),
+                    seconds: 6,
+                },
+                TitleUsage {
+                    title: Some("rxtt".into()),
+                    seconds: 2,
+                },
+                TitleUsage {
+                    title: Some("[ ! ] Action Required | rxtt".into()),
+                    seconds: 3,
+                },
+                TitleUsage {
+                    title: Some("[ . ] Action Required | rxtt".into()),
+                    seconds: 5,
+                },
+            ],
+            &config,
+        );
+        assert_eq!(terminal.len(), 2);
+        assert_eq!(terminal[0].seconds, 12);
+        assert_eq!(terminal[1].seconds, 8);
+    }
+}
