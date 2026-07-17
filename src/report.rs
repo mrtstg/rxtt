@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anstyle::{AnsiColor, Effects, Style};
 use chrono::{Local, NaiveDate};
 use rusqlite::{Connection, params};
 
 use crate::Result;
 use crate::config::TitleGroupingConfig;
+use crate::presentation::{TextStyles, format_duration, format_title};
 use crate::storage::open_database;
 
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +48,7 @@ pub fn print_report(
     )?;
     let total_usage = usage.iter().map(|app| app.seconds).sum();
     let selected_elapsed = selected_elapsed_seconds(range, Local::now().timestamp());
-    let styles = ReportStyles { ansi: !no_ansi };
+    let styles = TextStyles::new(!no_ansi);
 
     let heading = if range.since == range.until {
         format!(
@@ -98,63 +98,6 @@ pub fn print_report(
         }
     }
     Ok(())
-}
-
-struct ReportStyles {
-    ansi: bool,
-}
-
-impl ReportStyles {
-    fn header(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new()
-                .fg_color(Some(AnsiColor::BrightCyan.into()))
-                .effects(Effects::BOLD),
-        )
-    }
-
-    fn application(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new()
-                .fg_color(Some(AnsiColor::BrightGreen.into()))
-                .effects(Effects::BOLD),
-        )
-    }
-
-    fn branch(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new().fg_color(Some(AnsiColor::BrightBlack.into())),
-        )
-    }
-
-    fn title(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new().fg_color(Some(AnsiColor::BrightYellow.into())),
-        )
-    }
-
-    fn duration(&self, text: &str) -> String {
-        self.paint(text, Style::new().effects(Effects::DIMMED))
-    }
-
-    fn muted(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new().fg_color(Some(AnsiColor::BrightBlack.into())),
-        )
-    }
-
-    fn paint(&self, text: &str, style: Style) -> String {
-        if self.ansi {
-            format!("{style}{text}{style:#}")
-        } else {
-            text.to_owned()
-        }
-    }
 }
 
 fn load_usage(
@@ -273,23 +216,8 @@ fn load_title_usage(
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-pub(crate) fn format_duration(seconds: i64) -> String {
-    let hours = seconds / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    let seconds = seconds % 60;
-    match (hours, minutes) {
-        (0, 0) => format!("{seconds}s"),
-        (0, _) => format!("{minutes}m {seconds:02}s"),
-        _ => format!("{hours}h {minutes:02}m {seconds:02}s"),
-    }
-}
-
 fn selected_elapsed_seconds(range: TimeRange, now: i64) -> i64 {
     range.end.min(now).saturating_sub(range.start).max(0)
-}
-
-fn format_title(title: Option<&str>) -> String {
-    format!("\"{}\"", title.unwrap_or("<untitled>").replace('"', "\\\""))
 }
 
 #[cfg(test)]
@@ -352,13 +280,6 @@ mod tests {
     }
 
     #[test]
-    fn duration_format_is_compact() {
-        assert_eq!(format_duration(5), "5s");
-        assert_eq!(format_duration(65), "1m 05s");
-        assert_eq!(format_duration(3_665), "1h 01m 05s");
-    }
-
-    #[test]
     fn selected_elapsed_time_stops_at_now() {
         let range = TimeRange {
             start: 1_000,
@@ -369,25 +290,6 @@ mod tests {
         assert_eq!(selected_elapsed_seconds(range, 1_250), 250);
         assert_eq!(selected_elapsed_seconds(range, 3_000), 1_000);
         assert_eq!(selected_elapsed_seconds(range, 500), 0);
-    }
-
-    #[test]
-    fn title_output_keeps_unicode_format_characters() {
-        assert_eq!(format_title(Some("\u{200e}example")), "\"\u{200e}example\"");
-    }
-
-    #[test]
-    fn no_ansi_style_preserves_plain_text() {
-        let styles = ReportStyles { ansi: false };
-        assert_eq!(styles.header("Report"), "Report");
-        assert_eq!(styles.application("Example"), "Example");
-    }
-
-    #[test]
-    fn ansi_style_wraps_text_in_escape_sequences() {
-        let rendered = ReportStyles { ansi: true }.header("Report");
-        assert!(rendered.starts_with("\x1b["));
-        assert!(rendered.ends_with("\x1b[0m"));
     }
 
     #[test]

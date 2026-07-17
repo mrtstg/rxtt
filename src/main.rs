@@ -3,6 +3,7 @@ mod config;
 mod dispatcher;
 mod model;
 mod output;
+mod presentation;
 mod report;
 mod storage;
 mod tracker;
@@ -75,7 +76,7 @@ fn run_title_test(args: TitleTestArgs, title_grouping_config: &config::TitleGrou
     let trace = title_grouping_config.trace_title(&args.app_id, &args.title);
     println!("{}", config::format_title_trace(&args.app_id, &trace));
     match args.expect {
-        Some(expected) if title_matches_expectation(&expected, &trace.result) => {
+        Some(expected) if expected == trace.result => {
             println!("Expectation: PASS");
             0
         }
@@ -109,10 +110,6 @@ fn run_workflow(args: WorkflowArgs) -> i32 {
             1
         }
     }
-}
-
-fn title_matches_expectation(expected: &str, result: &str) -> bool {
-    expected == result
 }
 
 fn run_daemon(args: DaemonArgs) -> i32 {
@@ -172,16 +169,5 @@ fn connect_or_exit(track_idle: bool) -> X11Source {
             eprintln!("ERROR: cannot initialize X11 tracker: {error}");
             std::process::exit(2);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn title_test_expectation_requires_an_exact_final_title() {
-        assert!(title_matches_expectation("inbox", "inbox"));
-        assert!(!title_matches_expectation("Inbox", "inbox"));
     }
 }

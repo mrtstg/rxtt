@@ -1,12 +1,12 @@
 use std::path::Path;
 
-use anstyle::{AnsiColor, Effects, Style};
 use chrono::{Local, TimeZone};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
 use crate::Result;
-use crate::report::{TimeRange, format_duration};
+use crate::presentation::{TextStyles, format_duration, format_title};
+use crate::report::TimeRange;
 use crate::storage::open_database;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -99,7 +99,7 @@ fn merge_adjacent(entries: Vec<WorkflowEntry>) -> Vec<WorkflowEntry> {
 }
 
 fn render_workflow(entries: &[WorkflowEntry], range: TimeRange, ansi: bool) -> String {
-    let styles = WorkflowStyles { ansi };
+    let styles = TextStyles::new(ansi);
     let heading = if range.since == range.until {
         format!("Workflow for {}", range.since)
     } else {
@@ -138,64 +138,6 @@ fn format_timestamp(timestamp: i64, include_date: bool) -> String {
         .single()
         .map(|timestamp| timestamp.format(format).to_string())
         .unwrap_or_else(|| format!("<invalid timestamp {timestamp}>"))
-}
-
-fn format_title(title: Option<&str>) -> String {
-    format!("\"{}\"", title.unwrap_or("<untitled>").replace('"', "\\\""))
-}
-
-struct WorkflowStyles {
-    ansi: bool,
-}
-
-impl WorkflowStyles {
-    fn header(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new()
-                .fg_color(Some(AnsiColor::BrightCyan.into()))
-                .effects(Effects::BOLD),
-        )
-    }
-
-    fn time(&self, text: &str) -> String {
-        self.paint(text, Style::new().effects(Effects::DIMMED))
-    }
-
-    fn application(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new()
-                .fg_color(Some(AnsiColor::BrightGreen.into()))
-                .effects(Effects::BOLD),
-        )
-    }
-
-    fn title(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new().fg_color(Some(AnsiColor::BrightYellow.into())),
-        )
-    }
-
-    fn duration(&self, text: &str) -> String {
-        self.paint(text, Style::new().effects(Effects::DIMMED))
-    }
-
-    fn muted(&self, text: &str) -> String {
-        self.paint(
-            text,
-            Style::new().fg_color(Some(AnsiColor::BrightBlack.into())),
-        )
-    }
-
-    fn paint(&self, text: &str, style: Style) -> String {
-        if self.ansi {
-            format!("{style}{text}{style:#}")
-        } else {
-            text.to_owned()
-        }
-    }
 }
 
 #[cfg(test)]
