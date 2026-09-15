@@ -7,6 +7,7 @@ mod presentation;
 mod report;
 mod storage;
 mod tracker;
+mod unlogged;
 mod workflow;
 mod x11;
 
@@ -62,6 +63,7 @@ fn run_report(args: ReportArgs, title_grouping_config: &config::TitleGroupingCon
         !args.no_tree,
         !args.no_group_titles,
         args.no_ansi,
+        args.verbose,
         title_grouping_config,
     ) {
         Ok(()) => 0,
@@ -103,7 +105,7 @@ fn run_workflow(args: WorkflowArgs) -> i32 {
             return 2;
         }
     };
-    match workflow::print_workflow(&database_path, range, args.no_ansi, args.json) {
+    match workflow::print_workflow(&database_path, range, args.no_ansi, args.json, args.verbose) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("ERROR: cannot create workflow: {error}");

@@ -79,6 +79,10 @@ pub struct ReportArgs {
     #[arg(long)]
     pub no_group_titles: bool,
 
+    /// List the start, end, and duration of each unlogged period.
+    #[arg(long)]
+    pub verbose: bool,
+
     /// Disable ANSI styling in report output.
     #[arg(long)]
     pub no_ansi: bool,
@@ -101,6 +105,10 @@ pub struct WorkflowArgs {
     /// Disable ANSI styling in workflow output.
     #[arg(long)]
     pub no_ansi: bool,
+
+    /// Include unlogged entries in JSON (text output always includes them).
+    #[arg(long)]
+    pub verbose: bool,
 
     /// Export workflow entries as JSON.
     #[arg(long)]
@@ -334,5 +342,26 @@ mod tests {
             panic!("expected workflow command");
         };
         assert!(args.time_range().is_err());
+    }
+    #[test]
+    fn verbose_is_opt_in_for_report_and_workflow() {
+        for verbose in [false, true] {
+            let mut args = vec!["rxtt", "report"];
+            if verbose {
+                args.push("--verbose");
+            }
+            let Command::Report(report) = Cli::try_parse_from(args).unwrap().command else {
+                panic!()
+            };
+            assert_eq!(report.verbose, verbose);
+            let mut args = vec!["rxtt", "workflow", "--json"];
+            if verbose {
+                args.push("--verbose");
+            }
+            let Command::Workflow(workflow) = Cli::try_parse_from(args).unwrap().command else {
+                panic!()
+            };
+            assert_eq!(workflow.verbose, verbose);
+        }
     }
 }

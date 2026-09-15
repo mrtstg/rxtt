@@ -97,7 +97,7 @@ You can change path depending from where `rxtt` is installed.
 | --- | --- |
 | `rxtt daemon` | Foreground tracker. Watches X11 focus/idle, writes intervals to SQLite |
 | `rxtt report` | Usage totals grouped by application and title for a date range |
-| `rxtt workflow` | Chronological sequence of active window spans |
+| `rxtt workflow` | Chronological active window spans and unlogged periods |
 | `rxtt title-test` | Trace how a raw title normalizes through grouping rules |
 | `rxtt probe` | Diagnostic: print X11/EWMH/XScreenSaver support and current active window |
 
@@ -154,6 +154,8 @@ Print usage totals grouped by application. Shows title tree (collapsed equivalen
 
 Date range defaults to today. Heading shows `(active usage / elapsed selected range)`. When range includes today, elapsed ends at current time.
 
+Below the heading, `Unlogged: <duration>` shows elapsed time with no completed active or idle record, including gaps before the first record and after the last. Recorded idle time is logged and does not count toward this total. Use `--verbose` to list each unlogged period with its local start/end times and duration. Future time is excluded; an empty database makes the entire elapsed selection unlogged.
+
 ### Arguments
 
 | Flag | Default | Description |
@@ -161,6 +163,7 @@ Date range defaults to today. Heading shows `(active usage / elapsed selected ra
 | `--database PATH` | same as daemon | SQLite database path |
 | `--since YYYY-MM-DD` | today | First included calendar date (inclusive) |
 | `--until YYYY-MM-DD` | today | Last included calendar date (inclusive) |
+| `--verbose` | off | List each unlogged period beneath the unlogged total |
 | `--no-tree` | off | Hide title branches below each application |
 | `--no-group-titles` | off | Show exact stored titles instead of grouping equivalents |
 | `--no-ansi` | off | Disable ANSI styling (use when redirecting to file) |
@@ -180,6 +183,9 @@ Rules run in file order. Every replacement in a rule runs in order. See [Config]
 # Today
 rxtt report
 
+# Show exactly when time was unlogged
+rxtt report --verbose
+
 # Two-week range with title tree
 rxtt report --since 2026-07-01 --until 2026-07-16
 
@@ -191,9 +197,9 @@ rxtt report --since 2026-07-01 --until 2026-07-16 --no-tree --no-group-titles --
 
 ## `rxtt workflow`
 
-Print chronological active window spans. Each span shows: local start/end time, application, exact stored title, duration.
+Print chronological active window spans and unlogged periods. Active spans show local start/end time, application, exact stored title, and duration. Unlogged periods show local start/end time, `Unlogged`, and duration. Dates appear for multi-day selections and spans crossing midnight.
 
-Adjacent spans with identical app + raw title merge. Idle time omitted. Title changes shown at daemon's `--title-interval` resolution.
+Adjacent spans with identical app + raw title merge. Recorded idle time is omitted but does not count as unlogged. Gaps include the leading and trailing elapsed time in the selection, stopping at now. Title changes shown at daemon's `--title-interval` resolution.
 
 ### Arguments
 
@@ -204,10 +210,17 @@ Adjacent spans with identical app + raw title merge. Idle time omitted. Title ch
 | `--until YYYY-MM-DD` | today | Last included calendar date (inclusive) |
 | `--no-ansi` | off | Disable ANSI styling |
 | `--json` | off | Export as JSON array (suppresses heading/ANSI) |
+| `--verbose` | off | Include unlogged entries and entry kinds in JSON; text already includes gaps |
 
 ### JSON output
 
-Each entry: `{ "app_id", "title" (or null), "started_at" (unix), "ended_at" (unix), "duration_seconds" }`
+Default JSON remains an array of active entries: `{ "app_id", "title" (or null), "started_at" (unix), "ended_at" (unix), "duration_seconds" }`.
+
+With `--json --verbose`, the array includes unlogged periods in chronological order. Active entries gain `"kind": "active"`; unlogged entries have no application/title fields:
+
+```json
+{"kind": "unlogged", "started_at": 1789456500, "ended_at": 1789458300, "duration_seconds": 1800}
+````
 
 ### Usage
 
@@ -215,11 +228,31 @@ Each entry: `{ "app_id", "title" (or null), "started_at" (unix), "ended_at" (uni
 # Chronological view for two weeks
 rxtt workflow --since 2026-07-01 --until 2026-07-16
 
-# JSON export
+# JSON export with unlogged periods
+rxtt workflow --json --verbose
+
+# Active-only JSON export
 rxtt workflow --since 2026-07-01 --json > workflow.json
 ```
 
 
+
+### Unlogged output example
+
+```text
+# rxtt report --verbose --no-ansi
+Usage report for 2026-09-15 (1h 00m 00s/2h 00m 00s)
+Unlogged: 30m 00s
+  01:00:00–01:30:00  Unlogged  30m 00s
+Alacritty  1h 00m 00s
+
+# rxtt workflow --no-ansi
+Workflow for 2026-09-15
+00:00:00–01:00:00  Alacritty  "rxtt"  1h 00m 00s
+01:00:00–01:30:00  Unlogged  30m 00s
+```
+
+This example has 30 minutes of recorded idle time after the gap. “Unlogged” describes missing completed records, not proof that the computer was offline. The daemon keeps its current interval in memory until it finishes, so that unfinished interval temporarily appears unlogged. Shutdowns, tracker downtime, and lost unfinished intervals can also leave gaps. These commands infer gaps without changing stored data.
 
 ## `rxtt title-test`
 

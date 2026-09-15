@@ -1,3 +1,5 @@
+use chrono::{Local, TimeZone};
+
 use anstyle::{AnsiColor, Effects, Style};
 
 pub(crate) struct TextStyles {
@@ -106,5 +108,58 @@ mod tests {
         let rendered = TextStyles::new(true).header("Report");
         assert!(rendered.starts_with("\x1b["));
         assert!(rendered.ends_with("\x1b[0m"));
+    }
+}
+
+/// Show dates for multi-day selections and spans crossing local midnight.
+pub(crate) fn format_period(start: i64, end: i64, multi_day: bool) -> String {
+    let date = |ts| {
+        Local
+            .timestamp_opt(ts, 0)
+            .single()
+            .map(|dt| dt.date_naive())
+    };
+    let include_date = multi_day || date(start) != date(end);
+    format!(
+        "{}–{}",
+        format_timestamp(start, include_date),
+        format_timestamp(end, include_date)
+    )
+}
+
+pub(crate) fn format_timestamp(timestamp: i64, include_date: bool) -> String {
+    let format = if include_date {
+        "%Y-%m-%d %H:%M:%S"
+    } else {
+        "%H:%M:%S"
+    };
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|timestamp| timestamp.format(format).to_string())
+        .unwrap_or_else(|| format!("<invalid timestamp {timestamp}>"))
+}
+
+#[cfg(test)]
+mod period_tests {
+    use super::*;
+
+    #[test]
+    fn crossing_midnight_includes_both_dates() {
+        let start = Local
+            .with_ymd_and_hms(2026, 1, 1, 23, 59, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        let end = Local
+            .with_ymd_and_hms(2026, 1, 2, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            format_period(start, end, false),
+            "2026-01-01 23:59:00–2026-01-02 00:00:00"
+        );
+        assert_eq!(format_period(start, start + 30, false), "23:59:00–23:59:30");
     }
 }

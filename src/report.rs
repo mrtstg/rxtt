@@ -8,6 +8,7 @@ use crate::Result;
 use crate::config::TitleGroupingConfig;
 use crate::presentation::{TextStyles, format_duration, format_title};
 use crate::storage::open_database;
+use crate::unlogged::{load_unlogged, render_summary};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TimeRange {
@@ -36,18 +37,23 @@ pub fn print_report(
     tree: bool,
     group_titles: bool,
     no_ansi: bool,
+    verbose: bool,
     title_grouping_config: &TitleGroupingConfig,
 ) -> Result<()> {
-    let connection = open_database(path)?;
+    let now = Local::now().timestamp();
+    let mut connection = open_database(path)?;
+    let transaction = connection.transaction()?;
     let usage = load_usage(
-        &connection,
+        &transaction,
         range,
         tree,
         group_titles,
         title_grouping_config,
     )?;
+    let gaps = load_unlogged(&transaction, range, now)?;
+    transaction.commit()?;
     let total_usage = usage.iter().map(|app| app.seconds).sum();
-    let selected_elapsed = selected_elapsed_seconds(range, Local::now().timestamp());
+    let selected_elapsed = selected_elapsed_seconds(range, now);
     let styles = TextStyles::new(!no_ansi);
 
     let heading = if range.since == range.until {
@@ -67,6 +73,7 @@ pub fn print_report(
         )
     };
     println!("{}", styles.header(&heading));
+    println!("{}", render_summary(&gaps, range, verbose, &styles));
 
     if usage.is_empty() {
         println!("{}", styles.muted("No completed active intervals."));
