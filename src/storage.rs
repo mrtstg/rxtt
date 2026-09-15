@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Local};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 
 use crate::Result;
 use crate::model::{ActivityEvent, ActivityState, IntervalId, WindowInfo};
@@ -195,6 +195,22 @@ pub fn open_database(path: &Path) -> Result<Connection> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
     initialize_schema(&mut connection)?;
+    Ok(connection)
+}
+
+pub fn open_database_read_only(path: &Path) -> Result<Connection> {
+    let connection =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| {
+            format!(
+                "cannot open existing activity database {}: {error}",
+                path.display()
+            )
+        })?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version != 1 {
+        return Err(format!("unsupported or uninitialized database schema version {version}; reporting requires version 1").into());
+    }
     Ok(connection)
 }
 
@@ -452,6 +468,50 @@ mod tests {
         assert_eq!(segments[1].0, "second");
         assert!((segments[0].1 - 10.0).abs() < 0.001);
         assert!((segments[1].1 - 10.0).abs() < 0.001);
+        Ok(())
+    }
+    #[test]
+    fn report_connections_are_read_only_and_observe_wal_snapshots() -> Result<()> {
+        let root = env::temp_dir().join(format!(
+            "rxtt-read-only-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let path = root.join("activity.sqlite3");
+        assert!(open_database_read_only(&path).is_err());
+        assert!(!root.exists());
+        let writer = open_database(&path)?;
+        writer.execute_batch(
+            "CREATE TABLE snapshot_test (value INTEGER); INSERT INTO snapshot_test VALUES (1);",
+        )?;
+        let mut reader = open_database_read_only(&path)?;
+        assert!(
+            reader
+                .execute("INSERT INTO snapshot_test VALUES (2)", [])
+                .is_err()
+        );
+        let transaction = reader.transaction()?;
+        let count = |connection: &Connection| {
+            connection.query_row("SELECT COUNT(*) FROM snapshot_test", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        };
+        assert_eq!(count(&transaction)?, 1);
+        writer.execute("INSERT INTO snapshot_test VALUES (2)", [])?;
+        assert_eq!(count(&transaction)?, 1);
+        transaction.commit()?;
+        assert_eq!(count(&reader)?, 2);
+        drop(reader);
+        for version in [0, 2] {
+            writer.pragma_update(None, "user_version", version)?;
+            assert!(open_database_read_only(&path).is_err());
+            let actual: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            assert_eq!(actual, version);
+        }
+        drop(writer);
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

@@ -1,6 +1,8 @@
+use crate::presentation::{escape_terminal, quote_terminal};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -120,7 +122,7 @@ pub fn format_title_trace(app_id: &str, trace: &TitleGroupingTrace) -> String {
 }
 
 fn display_title(value: &str) -> String {
-    format!("\"{value}\"")
+    quote_terminal(value, '"')
 }
 
 #[derive(Deserialize)]
@@ -167,9 +169,10 @@ pub fn load(path: Option<&Path>) -> TitleGroupingConfig {
     match load_from_path(&path) {
         Ok(config) => config,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!(
                 "WARNING: cannot load rxtt config {}: {error}; using built-in title-grouping filters",
-                path.display()
+                escape_terminal(&path.display().to_string())
             );
             TitleGroupingConfig::built_in()
         }
@@ -197,7 +200,15 @@ impl TitleGroupingConfig {
     }
 
     pub fn normalize_title(&self, app_id: &str, title: &str) -> String {
-        self.trace_title(app_id, title).result
+        let mut current = normalize_universal_title(title);
+        for app in &self.apps {
+            if app.app_match.is_match(app_id) {
+                for replacement in &app.replacements {
+                    current = replacement.apply(&current);
+                }
+            }
+        }
+        current
     }
 
     pub fn trace_title(&self, app_id: &str, title: &str) -> TitleGroupingTrace {
@@ -213,10 +224,7 @@ impl TitleGroupingConfig {
                         .iter()
                         .map(|replacement| {
                             let input = current.clone();
-                            current = replacement
-                                .pattern
-                                .replace_all(&current, replacement.replacement.as_str())
-                                .into_owned();
+                            current = replacement.apply(&current);
                             ReplacementTrace {
                                 pattern: replacement.pattern_source.clone(),
                                 replacement: replacement.replacement.clone(),
@@ -265,17 +273,43 @@ fn normalize_quote(character: char) -> char {
 }
 
 fn load_from_path(path: &Path) -> Result<TitleGroupingConfig, String> {
-    if !path.exists() {
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            create_default_config(path)?;
+            fs::read_to_string(path).map_err(|error| error.to_string())?
         }
-        fs::write(path, DEFAULT_CONFIG).map_err(|error| error.to_string())?;
-    }
-    let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        Err(error) => return Err(error.to_string()),
+    };
     parse(&contents)
+}
+
+fn create_default_config(path: &Path) -> Result<(), String> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => file
+            .write_all(DEFAULT_CONFIG.as_bytes())
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+impl TitleReplacement {
+    fn apply(&self, title: &str) -> String {
+        self.pattern
+            .replace_all(title, self.replacement.as_str())
+            .into_owned()
+    }
 }
 
 fn parse(contents: &str) -> Result<TitleGroupingConfig, String> {
@@ -432,7 +466,7 @@ mod tests {
         let rendered = format_title_trace("Firefox", &trace);
 
         assert!(rendered.contains("(5) Inbox"));
-        assert!(!rendered.contains("\\u{200e}"));
+        assert!(rendered.contains("\\u{200e}"));
         assert!(rendered.contains("(5) inbox\" -> \"inbox\" (changed)"));
         assert!(rendered.contains("inbox\" -> \"inbox\" (unchanged)"));
         assert!(rendered.contains("Rule 2: skipped"));
@@ -449,5 +483,49 @@ mod tests {
                 .is_err()
         );
         assert!(parse("version = 1\n[title_grouping]\napps = [{ match = 'x', replacements = [{ pattern = '(', replacement = '' }] }]").is_err());
+    }
+    #[test]
+    fn exclusive_creation_preserves_existing_configuration() {
+        let path = std::env::temp_dir().join(format!(
+            "rxtt-config-exclusive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        create_default_config(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+        let custom = "version = 1\n[title_grouping]\napps = []\n";
+        fs::write(&path, custom).unwrap();
+        create_default_config(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), custom);
+        assert!(load_from_path(&path).unwrap().apps.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn normal_and_traced_normalization_agree() {
+        let config = TitleGroupingConfig::built_in();
+        for app in [
+            "Firefox",
+            "Telegram",
+            "Alacritty",
+            "unknown",
+            "Firefox Telegram",
+        ] {
+            for title in [
+                "(5) Inbox",
+                "[!] Working",
+                "\u{200e}ＡＢＣ   ‘Title’",
+                "",
+                "no changes",
+            ] {
+                assert_eq!(
+                    config.normalize_title(app, title),
+                    config.trace_title(app, title).result
+                );
+            }
+        }
     }
 }

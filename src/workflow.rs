@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use crate::Result;
 use crate::presentation::{TextStyles, format_duration, format_period, format_title};
-use crate::report::TimeRange;
-use crate::storage::open_database;
+use crate::storage::open_database_read_only;
+use crate::time::TimeRange;
 use crate::unlogged::{Gap, load_unlogged};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -24,15 +24,20 @@ impl WorkflowEntry {
     }
 }
 
-pub fn print_workflow(
-    path: &Path,
-    range: TimeRange,
-    no_ansi: bool,
-    json: bool,
-    verbose: bool,
-) -> Result<()> {
+pub struct WorkflowOptions {
+    pub no_ansi: bool,
+    pub json: bool,
+    pub verbose: bool,
+}
+
+pub fn print_workflow(path: &Path, range: TimeRange, options: WorkflowOptions) -> Result<()> {
+    let WorkflowOptions {
+        no_ansi,
+        json,
+        verbose,
+    } = options;
     let now = Local::now().timestamp();
-    let mut connection = open_database(path)?;
+    let mut connection = open_database_read_only(path)?;
     let transaction = connection.transaction()?;
     let entries = load_workflow(&transaction, range)?;
     let gaps = load_unlogged(&transaction, range, now)?;
@@ -52,26 +57,46 @@ pub fn print_workflow(
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum VerboseEntry<'a> {
+    Active(WorkflowJsonEntry<'a>),
+    Unlogged {
+        started_at: i64,
+        ended_at: i64,
+        duration_seconds: i64,
+    },
+}
+
 fn render_verbose_json(entries: &[WorkflowEntry], gaps: &[Gap]) -> serde_json::Result<String> {
-    let mut rows: Vec<serde_json::Value> = serde_json::from_str(&render_workflow_json(entries)?)?;
-    for row in &mut rows {
-        row["kind"] = "active".into();
-    }
-    rows.extend(gaps.iter().map(|gap| {
-        serde_json::json!({
-            "kind": "unlogged",
-            "started_at": gap.started_at,
-            "ended_at": gap.ended_at,
-            "duration_seconds": gap.duration_seconds(),
+    let mut rows: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.started_at,
+                entry.ended_at,
+                VerboseEntry::Active(entry.into()),
+            )
         })
-    }));
-    rows.sort_by_key(|row| {
+        .collect();
+    rows.extend(gaps.iter().map(|gap| {
         (
-            row["started_at"].as_i64().unwrap(),
-            row["ended_at"].as_i64().unwrap(),
+            gap.started_at,
+            gap.ended_at,
+            VerboseEntry::Unlogged {
+                started_at: gap.started_at,
+                ended_at: gap.ended_at,
+                duration_seconds: gap.duration_seconds(),
+            },
         )
-    });
-    serde_json::to_string_pretty(&rows)
+    }));
+    rows.sort_by_key(|(start, end, _)| (*start, *end));
+    serde_json::to_string_pretty(
+        &rows
+            .into_iter()
+            .map(|(_, _, entry)| entry)
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[derive(Serialize)]
@@ -83,18 +108,25 @@ struct WorkflowJsonEntry<'a> {
     duration_seconds: i64,
 }
 
-fn render_workflow_json(entries: &[WorkflowEntry]) -> serde_json::Result<String> {
-    let entries = entries
-        .iter()
-        .map(|entry| WorkflowJsonEntry {
+impl<'a> From<&'a WorkflowEntry> for WorkflowJsonEntry<'a> {
+    fn from(entry: &'a WorkflowEntry) -> Self {
+        Self {
             app_id: &entry.app_id,
             title: entry.title.as_deref(),
             started_at: entry.started_at,
             ended_at: entry.ended_at,
             duration_seconds: entry.duration_seconds(),
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&entries)
+        }
+    }
+}
+
+fn render_workflow_json(entries: &[WorkflowEntry]) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(
+        &entries
+            .iter()
+            .map(WorkflowJsonEntry::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn load_workflow(connection: &Connection, range: TimeRange) -> Result<Vec<WorkflowEntry>> {
@@ -168,7 +200,7 @@ fn render_workflow(
                     entry.ended_at,
                     range.since != range.until
                 )),
-                styles.application(&entry.app_id),
+                styles.application(&crate::presentation::escape_terminal(&entry.app_id)),
                 styles.title(&format_title(entry.title.as_deref())),
                 styles.duration(&format_duration(entry.duration_seconds())),
             ),
@@ -361,5 +393,32 @@ mod tests {
         assert!(empty.contains("No completed active intervals."));
         assert_eq!(empty.matches("Unlogged").count(), 2);
         Ok(())
+    }
+    #[test]
+    fn json_keeps_raw_values_while_text_escapes_them() {
+        let raw = "a\x1b[31m\n\u{202e}\\b";
+        let entries = [WorkflowEntry {
+            app_id: raw.into(),
+            title: Some(raw.into()),
+            started_at: 0,
+            ended_at: 1,
+        }];
+        for json in [
+            render_workflow_json(&entries).unwrap(),
+            render_verbose_json(&entries, &[]).unwrap(),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value[0]["app_id"], raw);
+            assert_eq!(value[0]["title"], raw);
+        }
+        let text = render_workflow(
+            &entries,
+            &[],
+            range(0, 1, "1970-01-01", "1970-01-01"),
+            false,
+        );
+        assert_eq!(text.lines().count(), 2);
+        assert!(!text.contains('\x1b'));
+        assert!(text.contains("\\u{202e}"));
     }
 }

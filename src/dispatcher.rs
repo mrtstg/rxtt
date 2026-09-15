@@ -119,8 +119,11 @@ mod tests {
     #[test]
     fn sqlite_write_failure_is_reported_to_the_tracker() -> Result<()> {
         let path = env::temp_dir().join(format!(
-            "rxtt-dispatcher-test-{}-{}.sqlite3",
+            "rxtt-dispatcher-test-{}-{}-{}.sqlite3",
             std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos(),
             NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
         ));
         let storage = Storage::open(&path)?;

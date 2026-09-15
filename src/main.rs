@@ -6,6 +6,7 @@ mod output;
 mod presentation;
 mod report;
 mod storage;
+mod time;
 mod tracker;
 mod unlogged;
 mod workflow;
@@ -14,6 +15,8 @@ mod x11;
 use std::error::Error;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use crate::presentation::escape_terminal;
+use clap::Parser;
 use cli::{Cli, Command, DaemonArgs, ReportArgs, TitleTestArgs, WorkflowArgs};
 use dispatcher::spawn_activity_dispatcher;
 use output::print_probe;
@@ -25,7 +28,7 @@ use x11::X11Source;
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn main() {
-    let (command, config_path) = Cli::parse_and_validate().into_parts();
+    let (command, config_path) = Cli::parse().into_parts();
     let title_grouping_config = config::load(config_path.as_deref());
     let exit_code = match command {
         Command::Daemon(args) => run_daemon(args),
@@ -43,16 +46,18 @@ fn run_probe() -> i32 {
 }
 
 fn run_report(args: ReportArgs, title_grouping_config: &config::TitleGroupingConfig) -> i32 {
-    let database_path = match args.database_path() {
+    let database_path = match args.selection.database_path() {
         Ok(path) => path,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: cannot determine activity database path: {error}");
             return 2;
         }
     };
-    let range = match args.time_range() {
+    let range = match args.selection.time_range() {
         Ok(range) => range,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: invalid report date range: {error}");
             return 2;
         }
@@ -60,14 +65,17 @@ fn run_report(args: ReportArgs, title_grouping_config: &config::TitleGroupingCon
     match report::print_report(
         &database_path,
         range,
-        !args.no_tree,
-        !args.no_group_titles,
-        args.no_ansi,
-        args.verbose,
+        report::ReportOptions {
+            tree: !args.no_tree,
+            group_titles: !args.no_group_titles,
+            no_ansi: args.no_ansi,
+            verbose: args.verbose,
+        },
         title_grouping_config,
     ) {
         Ok(()) => 0,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: cannot create usage report: {error}");
             1
         }
@@ -83,7 +91,10 @@ fn run_title_test(args: TitleTestArgs, title_grouping_config: &config::TitleGrou
             0
         }
         Some(expected) => {
-            println!("Expectation: FAIL (expected \"{expected}\")");
+            println!(
+                "Expectation: FAIL (expected {})",
+                presentation::quote_terminal(&expected, '"')
+            );
             1
         }
         None => 0,
@@ -91,23 +102,34 @@ fn run_title_test(args: TitleTestArgs, title_grouping_config: &config::TitleGrou
 }
 
 fn run_workflow(args: WorkflowArgs) -> i32 {
-    let database_path = match args.database_path() {
+    let database_path = match args.selection.database_path() {
         Ok(path) => path,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: cannot determine activity database path: {error}");
             return 2;
         }
     };
-    let range = match args.time_range() {
+    let range = match args.selection.time_range() {
         Ok(range) => range,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: invalid workflow date range: {error}");
             return 2;
         }
     };
-    match workflow::print_workflow(&database_path, range, args.no_ansi, args.json, args.verbose) {
+    match workflow::print_workflow(
+        &database_path,
+        range,
+        workflow::WorkflowOptions {
+            no_ansi: args.no_ansi,
+            json: args.json,
+            verbose: args.verbose,
+        },
+    ) {
         Ok(()) => 0,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: cannot create workflow: {error}");
             1
         }
@@ -119,6 +141,7 @@ fn run_daemon(args: DaemonArgs) -> i32 {
     let database_path = match args.database_path() {
         Ok(path) => path,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: cannot determine activity database path: {error}");
             return 2;
         }
@@ -127,8 +150,9 @@ fn run_daemon(args: DaemonArgs) -> i32 {
         Ok(storage) => storage,
         Err(error) => {
             eprintln!(
-                "ERROR: cannot initialize activity database {}: {error}",
-                database_path.display()
+                "ERROR: cannot initialize activity database {}: {}",
+                escape_terminal(&database_path.display().to_string()),
+                escape_terminal(&error.to_string())
             );
             return 2;
         }
@@ -136,6 +160,7 @@ fn run_daemon(args: DaemonArgs) -> i32 {
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     for signal in [SIGINT, SIGTERM] {
         if let Err(error) = signal_hook::flag::register(signal, Arc::clone(&shutdown_requested)) {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: cannot install signal handler: {error}");
             return 2;
         }
@@ -150,14 +175,19 @@ fn run_daemon(args: DaemonArgs) -> i32 {
     );
     let run_result = tracker.run(&shutdown_requested);
     if let Err(error) = &run_result {
+        let error = escape_terminal(&error.to_string());
         eprintln!("ERROR: activity tracker stopped unexpectedly: {error}");
         if let Err(finish_error) = tracker.finish_interval("tracker error") {
-            eprintln!("ERROR: cannot finish activity interval: {finish_error}");
+            eprintln!(
+                "ERROR: cannot finish activity interval: {}",
+                escape_terminal(&finish_error.to_string())
+            );
         }
     }
     drop(tracker);
     let dispatcher_result = dispatcher.join();
     if let Err(error) = dispatcher_result {
+        let error = escape_terminal(&error.to_string());
         eprintln!("ERROR: activity event dispatcher stopped unexpectedly: {error}");
         return 1;
     }
@@ -168,6 +198,7 @@ fn connect_or_exit(track_idle: bool) -> X11Source {
     match X11Source::connect(track_idle) {
         Ok(source) => source,
         Err(error) => {
+            let error = escape_terminal(&error.to_string());
             eprintln!("ERROR: cannot initialize X11 tracker: {error}");
             std::process::exit(2);
         }

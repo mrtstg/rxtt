@@ -1,3 +1,4 @@
+use crate::presentation::escape_terminal;
 use std::os::fd::AsFd;
 use std::thread;
 use std::time::Duration;
@@ -16,6 +17,14 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::Result;
 use crate::model::WindowInfo;
+
+// X11 property lengths are measured in four-byte units: 64 KiB maximum.
+const MAX_PROPERTY_UNITS: u32 = 16_384;
+
+fn valid_property(reply: GetPropertyReply, format: u8, units: u32) -> Option<GetPropertyReply> {
+    (reply.format == format && reply.bytes_after == 0 && reply.value.len() <= units as usize * 4)
+        .then_some(reply)
+}
 
 struct Atoms {
     active_window: Atom,
@@ -160,12 +169,7 @@ impl X11Source {
                 return None;
             };
 
-            if let Some(info) = self.read_window_info(window_id) {
-                return Some(info);
-            }
-            if attempt < 2 {
-                thread::sleep(Duration::from_millis(5));
-            }
+            return Some(self.read_window_info(window_id));
         }
         None
     }
@@ -215,11 +219,22 @@ impl X11Source {
     ) -> Option<GetPropertyReply> {
         // Focused windows may disappear between the EWMH lookup and metadata
         // requests. Treat those X11 races as missing metadata.
-        self.conn
-            .get_property(false, window, property, property_type, 0, u32::MAX)
+        let (format, length) = if property_type == u32::from(AtomEnum::ATOM) {
+            (32, MAX_PROPERTY_UNITS)
+        } else if property_type == u32::from(AtomEnum::WINDOW)
+            || property_type == u32::from(AtomEnum::CARDINAL)
+        {
+            (32, 1)
+        } else {
+            (8, MAX_PROPERTY_UNITS)
+        };
+        let reply = self
+            .conn
+            .get_property(false, window, property, property_type, 0, length)
             .ok()?
             .reply()
-            .ok()
+            .ok()?;
+        valid_property(reply, format, length)
     }
 
     fn active_window_id(&self) -> Option<Window> {
@@ -229,7 +244,7 @@ impl X11Source {
             .filter(|window| *window != 0)
     }
 
-    pub fn read_window_info(&self, window_id: Window) -> Option<WindowInfo> {
+    pub fn read_window_info(&self, window_id: Window) -> WindowInfo {
         let title = self
             .property(window_id, self.atoms.net_wm_name, self.atoms.utf8_string)
             .and_then(|reply| decode_text(&reply.value))
@@ -255,17 +270,18 @@ impl X11Source {
                 .map(|path| path.to_string_lossy().into_owned())
         });
 
-        Some(WindowInfo {
+        WindowInfo {
             window_id,
             title,
             wm_instance,
             wm_class,
             pid,
             executable,
-        })
+        }
     }
 
     fn disable_idle_tracking(&mut self, error: &str) {
+        let error = escape_terminal(error);
         eprintln!("WARNING: idle query failed; disabling idle detection: {error}");
         self.track_idle = false;
     }
@@ -329,5 +345,25 @@ mod tests {
             decode_wm_class(b"navigator\0Firefox\0"),
             (Some("navigator".into()), Some("Firefox".into()))
         );
+    }
+    #[test]
+    fn property_limits_reject_incomplete_or_wrong_format_values() {
+        let reply = |format, bytes_after, size| GetPropertyReply {
+            format,
+            bytes_after,
+            value: vec![b'x'; size],
+            ..Default::default()
+        };
+        assert!(valid_property(reply(8, 0, 65_536), 8, MAX_PROPERTY_UNITS).is_some());
+        assert!(valid_property(reply(8, 1, 65_536), 8, MAX_PROPERTY_UNITS).is_none());
+        assert!(valid_property(reply(8, 0, 65_537), 8, MAX_PROPERTY_UNITS).is_none());
+        assert!(valid_property(reply(32, 0, 4), 8, MAX_PROPERTY_UNITS).is_none());
+        assert!(valid_property(reply(32, 0, 4), 32, 1).is_some());
+        assert!(valid_property(reply(32, 4, 4), 32, 1).is_none());
+        assert!(valid_property(reply(32, 0, 65_536), 32, MAX_PROPERTY_UNITS).is_some());
+        let fallback = valid_property(reply(8, 4, 65_536), 8, MAX_PROPERTY_UNITS)
+            .and_then(|reply| decode_text(&reply.value))
+            .or_else(|| decode_text(b"fallback"));
+        assert_eq!(fallback.as_deref(), Some("fallback"));
     }
 }

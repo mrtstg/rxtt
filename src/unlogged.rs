@@ -2,7 +2,7 @@ use rusqlite::{Connection, params};
 
 use crate::Result;
 use crate::presentation::{TextStyles, format_duration, format_period};
-use crate::report::TimeRange;
+use crate::time::TimeRange;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Gap {

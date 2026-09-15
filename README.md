@@ -105,7 +105,7 @@ You can change path depending from where `rxtt` is installed.
 
 | Flag | Description |
 | --- | --- |
-| `--config PATH` | TOML config path (default: `$XDG_CONFIG_HOME/rxtt/config.toml` or `~/.config/rxtt/config.toml`). Auto-creates file with default rules on first run |
+| `--config PATH` | TOML config path (default: `$XDG_CONFIG_HOME/rxtt/config.toml` or `~/.config/rxtt/config.toml`). Creates a missing file with default rules on first run, without overwriting an existing file |
 
 
 
@@ -120,10 +120,12 @@ Only **completed** intervals persist. If the process dies mid-interval, in-memor
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--database PATH` | `$XDG_STATE_HOME/rxtt/activity.sqlite3` (or `~/.local/state/rxtt/activity.sqlite3`) | SQLite database path |
-| `--idle-threshold SECONDS` | `300` (5 min) | Seconds without input before entering idle state. Must be finite, >= 0 |
-| `--sample-interval SECONDS` | `0.25` | Seconds between safety focus/idle polls. Must be finite, > 0 |
-| `--title-interval SECONDS` | `5` | Minimum seconds between emitted title-change events for one active window (throttle) |
+| `--idle-threshold SECONDS` | `300` (5 min) | Seconds without input before entering idle state. Must be finite, >= 0, and representable as a duration |
+| `--sample-interval SECONDS` | `0.25` | Seconds between safety focus/idle polls. Must be finite, positive after nanosecond conversion, and fit the polling limit (2,147,483,647 ms) |
+| `--title-interval SECONDS` | `5` | Minimum seconds between emitted title-change events for one active window (throttle); finite, >= 0, representable as a duration |
 | `--no-idle` | off | Disable idle detection. Track focused windows only (no idle intervals) |
+
+Invalid or overflowing duration arguments are rejected during CLI parsing with exit code 2. Fractional seconds remain supported.
 
 ### Usage
 
@@ -154,7 +156,7 @@ Print usage totals grouped by application. Shows title tree (collapsed equivalen
 
 Date range defaults to today. Heading shows `(active usage / elapsed selected range)`. When range includes today, elapsed ends at current time.
 
-Below the heading, `Unlogged: <duration>` shows elapsed time with no completed active or idle record, including gaps before the first record and after the last. Recorded idle time is logged and does not count toward this total. Use `--verbose` to list each unlogged period with its local start/end times and duration. Future time is excluded; an empty database makes the entire elapsed selection unlogged.
+Below the heading, `Unlogged: <duration>` shows elapsed time with no completed active or idle record, including gaps before the first record and after the last. Recorded idle time is logged and does not count toward this total. Use `--verbose` to list each unlogged period with its local start/end times and duration. Future time is excluded; an initialized database with no records makes the entire elapsed selection unlogged. A missing database is an error (exit code 1); reporting does not create it or its parent directories.
 
 ### Arguments
 
@@ -198,6 +200,8 @@ rxtt report --since 2026-07-01 --until 2026-07-16 --no-tree --no-group-titles --
 ## `rxtt workflow`
 
 Print chronological active window spans and unlogged periods. Active spans show local start/end time, application, exact stored title, and duration. Unlogged periods show local start/end time, `Unlogged`, and duration. Dates appear for multi-day selections and spans crossing midnight.
+
+Like `report`, `workflow` requires an existing, initialized database and exits with code 1 if it is missing.
 
 Adjacent spans with identical app + raw title merge. Recorded idle time is omitted but does not count as unlogged. Gaps include the leading and trailing elapsed time in the selection, stopping at now. Title changes shown at daemon's `--title-interval` resolution.
 
@@ -340,7 +344,9 @@ Rules run in file order. Multiple rules can match same app (all replacements cha
 
 SQLite file at `~/.local/state/rxtt/activity.sqlite3` (or `--database` path).
 
-**Settings:** WAL mode, foreign keys ON, 5s busy timeout, versioned migrations (`PRAGMA user_version = 1`).
+**Settings:** The daemon initializes SQLite with WAL mode, foreign keys ON, a 5s busy timeout, and versioned migrations (`PRAGMA user_version = 1`).
+
+`report` and `workflow` open existing databases read-only, validate schema version 1, and read each result within one snapshot transaction. They do not initialize or migrate databases or change journal mode. SQLite may still use WAL coordination files when reading a running daemon’s database. Configuration-file initialization remains independent of database access.
 
 ### Schema (v1)
 
@@ -393,6 +399,9 @@ Splits each active interval into contiguous title segments. Starts from initial 
 
 
 ## Notes
+
+- **Terminal text:** Titles, application identifiers, diagnostic values, and other external text escape terminal control characters and Unicode bidi controls before styling. Newlines, carriage returns, and tabs appear as `\n`, `\r`, and `\t`; other controls appear as `\u{...}`. Backslashes and enclosing quotes are escaped consistently. Ordinary Unicode and emoji remain readable. Stored metadata and JSON values retain their raw text.
+- **X11 metadata limits:** Each title, window-manager name, or `WM_CLASS` property is limited to 64 KiB. Oversized or incorrectly formatted properties are treated as unavailable, not stored as truncated prefixes. Existing fallback paths still apply, such as `WM_NAME` when `_NET_WM_NAME` is unavailable. Scalar window/PID properties accept one 32-bit value; the supported-atom list is limited to 16,384 atoms, with incomplete lists treated as unavailable.
 
 - **WAL mode:** Database readable while daemon runs (concurrent reads safe)
 - **No recovery:** Unfinished intervals on crash are not recovered

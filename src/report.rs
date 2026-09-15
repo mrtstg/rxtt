@@ -1,22 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{Local, NaiveDate};
+use crate::time::{TimeRange, selected_elapsed_seconds};
+use chrono::Local;
 use rusqlite::{Connection, params};
 
 use crate::Result;
 use crate::config::TitleGroupingConfig;
 use crate::presentation::{TextStyles, format_duration, format_title};
-use crate::storage::open_database;
+use crate::storage::open_database_read_only;
 use crate::unlogged::{load_unlogged, render_summary};
-
-#[derive(Debug, Clone, Copy)]
-pub struct TimeRange {
-    pub start: i64,
-    pub end: i64,
-    pub since: NaiveDate,
-    pub until: NaiveDate,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 struct AppUsage {
@@ -31,17 +24,27 @@ struct TitleUsage {
     seconds: i64,
 }
 
+pub struct ReportOptions {
+    pub tree: bool,
+    pub group_titles: bool,
+    pub no_ansi: bool,
+    pub verbose: bool,
+}
+
 pub fn print_report(
     path: &Path,
     range: TimeRange,
-    tree: bool,
-    group_titles: bool,
-    no_ansi: bool,
-    verbose: bool,
+    options: ReportOptions,
     title_grouping_config: &TitleGroupingConfig,
 ) -> Result<()> {
+    let ReportOptions {
+        tree,
+        group_titles,
+        no_ansi,
+        verbose,
+    } = options;
     let now = Local::now().timestamp();
-    let mut connection = open_database(path)?;
+    let mut connection = open_database_read_only(path)?;
     let transaction = connection.transaction()?;
     let usage = load_usage(
         &transaction,
@@ -83,7 +86,7 @@ pub fn print_report(
     for app in usage {
         println!(
             "{}  {}",
-            styles.application(&app.app_id),
+            styles.application(&crate::presentation::escape_terminal(&app.app_id)),
             styles.duration(&format_duration(app.seconds))
         );
         if tree {
@@ -223,13 +226,10 @@ fn load_title_usage(
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn selected_elapsed_seconds(range: TimeRange, now: i64) -> i64 {
-    range.end.min(now).saturating_sub(range.start).max(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
 
     #[test]
     fn report_clips_app_and_title_segments_to_the_requested_range() -> Result<()> {

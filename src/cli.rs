@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chrono::{Local, NaiveDate, TimeZone};
-use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
+use chrono::NaiveDate;
+use clap::{Args, Parser, Subcommand};
+use nix::poll::PollTimeout;
 
-use crate::report::TimeRange;
 use crate::storage::default_database_path;
+use crate::time::{TimeRange, time_range};
 use crate::tracker::TrackerConfig;
 
 #[derive(Debug, Parser)]
@@ -41,16 +42,16 @@ pub struct DaemonArgs {
     pub database: Option<PathBuf>,
 
     /// Seconds without input before entering idle state.
-    #[arg(long, default_value_t = 300.0)]
-    idle_threshold: f64,
+    #[arg(long, default_value = "300", value_parser = parse_duration)]
+    idle_threshold: Duration,
 
     /// Seconds between safety focus and idle checks.
-    #[arg(long, default_value_t = 0.25)]
-    sample_interval: f64,
+    #[arg(long, default_value = "0.25", value_parser = parse_sample_duration)]
+    sample_interval: Duration,
 
     /// Minimum seconds between emitted title-change events for one active window.
-    #[arg(long = "title-interval", default_value_t = 5.0)]
-    title_change_min_interval: f64,
+    #[arg(long = "title-interval", default_value = "5", value_parser = parse_duration)]
+    title_change_min_interval: Duration,
 
     /// Disable idle detection and track focused windows only.
     #[arg(long)]
@@ -58,7 +59,7 @@ pub struct DaemonArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ReportArgs {
+pub struct SelectionArgs {
     /// SQLite database path (defaults to the XDG state directory).
     #[arg(long)]
     pub database: Option<PathBuf>,
@@ -70,6 +71,12 @@ pub struct ReportArgs {
     /// Last included calendar date (YYYY-MM-DD; defaults to today).
     #[arg(long, value_name = "DATE")]
     until: Option<NaiveDate>,
+}
+
+#[derive(Debug, Args)]
+pub struct ReportArgs {
+    #[command(flatten)]
+    pub selection: SelectionArgs,
 
     /// Hide title totals below each application.
     #[arg(long)]
@@ -90,17 +97,8 @@ pub struct ReportArgs {
 
 #[derive(Debug, Args)]
 pub struct WorkflowArgs {
-    /// SQLite database path (defaults to the XDG state directory).
-    #[arg(long)]
-    pub database: Option<PathBuf>,
-
-    /// First included calendar date (YYYY-MM-DD; defaults to today).
-    #[arg(long, value_name = "DATE")]
-    since: Option<NaiveDate>,
-
-    /// Last included calendar date (YYYY-MM-DD; defaults to today).
-    #[arg(long, value_name = "DATE")]
-    until: Option<NaiveDate>,
+    #[command(flatten)]
+    pub selection: SelectionArgs,
 
     /// Disable ANSI styling in workflow output.
     #[arg(long)]
@@ -129,14 +127,6 @@ pub struct TitleTestArgs {
 }
 
 impl Cli {
-    pub fn parse_and_validate() -> Self {
-        let cli = Self::parse();
-        if let Command::Daemon(args) = &cli.command {
-            args.validate();
-        }
-        cli
-    }
-
     pub fn into_parts(self) -> (Command, Option<PathBuf>) {
         (self.command, self.config)
     }
@@ -153,41 +143,14 @@ impl DaemonArgs {
 
     pub fn tracker_config(&self) -> TrackerConfig {
         TrackerConfig {
-            idle_threshold: Duration::from_secs_f64(self.idle_threshold),
-            sample_interval: Duration::from_secs_f64(self.sample_interval),
-            title_change_min_interval: Duration::from_secs_f64(self.title_change_min_interval),
-        }
-    }
-
-    fn validate(&self) {
-        if !self.idle_threshold.is_finite() || self.idle_threshold < 0.0 {
-            Cli::command()
-                .error(
-                    ErrorKind::ValueValidation,
-                    "--idle-threshold must be a finite value >= 0",
-                )
-                .exit();
-        }
-        if !self.sample_interval.is_finite() || self.sample_interval <= 0.0 {
-            Cli::command()
-                .error(
-                    ErrorKind::ValueValidation,
-                    "--sample-interval must be a finite value > 0",
-                )
-                .exit();
-        }
-        if !self.title_change_min_interval.is_finite() || self.title_change_min_interval < 0.0 {
-            Cli::command()
-                .error(
-                    ErrorKind::ValueValidation,
-                    "--title-interval must be a finite value >= 0",
-                )
-                .exit();
+            idle_threshold: self.idle_threshold,
+            sample_interval: self.sample_interval,
+            title_change_min_interval: self.title_change_min_interval,
         }
     }
 }
 
-impl ReportArgs {
+impl SelectionArgs {
     pub fn database_path(&self) -> crate::Result<PathBuf> {
         database_path(&self.database)
     }
@@ -197,14 +160,19 @@ impl ReportArgs {
     }
 }
 
-impl WorkflowArgs {
-    pub fn database_path(&self) -> crate::Result<PathBuf> {
-        database_path(&self.database)
-    }
+fn parse_duration(value: &str) -> Result<Duration, String> {
+    let seconds: f64 = value.parse().map_err(|_| "expected seconds as a number")?;
+    Duration::try_from_secs_f64(seconds)
+        .map_err(|_| "seconds must be finite, nonnegative, and representable".into())
+}
 
-    pub fn time_range(&self) -> crate::Result<TimeRange> {
-        time_range(self.since, self.until)
+fn parse_sample_duration(value: &str) -> Result<Duration, String> {
+    let duration = parse_duration(value)?;
+    if duration.is_zero() {
+        return Err("sample interval must be positive after conversion to nanoseconds".into());
     }
+    PollTimeout::try_from(duration).map_err(|_| "sample interval exceeds the polling limit")?;
+    Ok(duration)
 }
 
 fn database_path(database: &Option<PathBuf>) -> crate::Result<PathBuf> {
@@ -212,29 +180,6 @@ fn database_path(database: &Option<PathBuf>) -> crate::Result<PathBuf> {
         .clone()
         .map(Ok)
         .unwrap_or_else(default_database_path)
-}
-
-fn time_range(since: Option<NaiveDate>, until: Option<NaiveDate>) -> crate::Result<TimeRange> {
-    let today = Local::now().date_naive();
-    let since = since.unwrap_or(today);
-    let until = until.unwrap_or(today);
-    if until < since {
-        return Err("--until must not be earlier than --since".into());
-    }
-    let end_date = until.succ_opt().ok_or("--until is too late to represent")?;
-    Ok(TimeRange {
-        start: local_midnight(since)?.timestamp(),
-        end: local_midnight(end_date)?.timestamp(),
-        since,
-        until,
-    })
-}
-
-fn local_midnight(date: NaiveDate) -> crate::Result<chrono::DateTime<Local>> {
-    Local
-        .from_local_datetime(&date.and_hms_opt(0, 0, 0).ok_or("invalid report date")?)
-        .earliest()
-        .ok_or_else(|| format!("cannot determine local midnight for {date}").into())
 }
 
 #[cfg(test)]
@@ -320,11 +265,20 @@ mod tests {
         let Command::Workflow(args) = cli.command else {
             panic!("expected workflow command");
         };
-        assert_eq!(args.database, Some(PathBuf::from("/tmp/activity.sqlite3")));
+        assert_eq!(
+            args.selection.database,
+            Some(PathBuf::from("/tmp/activity.sqlite3"))
+        );
         assert!(args.no_ansi);
         assert!(args.json);
-        assert_eq!(args.time_range().unwrap().since.to_string(), "2026-07-01");
-        assert_eq!(args.time_range().unwrap().until.to_string(), "2026-07-02");
+        assert_eq!(
+            args.selection.time_range().unwrap().since.to_string(),
+            "2026-07-01"
+        );
+        assert_eq!(
+            args.selection.time_range().unwrap().until.to_string(),
+            "2026-07-02"
+        );
     }
 
     #[test]
@@ -341,7 +295,7 @@ mod tests {
         let Command::Workflow(args) = cli.command else {
             panic!("expected workflow command");
         };
-        assert!(args.time_range().is_err());
+        assert!(args.selection.time_range().is_err());
     }
     #[test]
     fn verbose_is_opt_in_for_report_and_workflow() {
@@ -363,5 +317,28 @@ mod tests {
             };
             assert_eq!(workflow.verbose, verbose);
         }
+    }
+    #[test]
+    fn durations_are_validated_during_parsing() {
+        let Command::Daemon(args) = Cli::try_parse_from(["rxtt", "daemon"]).unwrap().command else {
+            panic!()
+        };
+        let config = args.tracker_config();
+        assert_eq!(config.idle_threshold, Duration::from_secs(300));
+        assert_eq!(config.sample_interval, Duration::from_millis(250));
+        assert_eq!(config.title_change_min_interval, Duration::from_secs(5));
+        for flag in ["--idle-threshold", "--sample-interval", "--title-interval"] {
+            for value in ["NaN", "inf", "-1", "1e300"] {
+                assert!(
+                    Cli::try_parse_from(["rxtt", "daemon", &format!("{flag}={value}")]).is_err()
+                );
+            }
+            assert!(Cli::try_parse_from(["rxtt", "daemon", &format!("{flag}=0.125")]).is_ok());
+        }
+        assert!(parse_duration("0").unwrap().is_zero());
+        assert!(parse_sample_duration("0").is_err());
+        assert!(parse_sample_duration("1e-30").is_err());
+        assert!(parse_sample_duration("2147484").is_err());
+        assert!(parse_sample_duration("2147483").is_ok());
     }
 }

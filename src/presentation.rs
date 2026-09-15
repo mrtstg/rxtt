@@ -78,8 +78,33 @@ pub(crate) fn format_duration(seconds: i64) -> String {
     }
 }
 
+pub(crate) fn escape_terminal(value: &str) -> String {
+    let mut output = String::new();
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            c if c.is_control()
+                || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
+            {
+                use std::fmt::Write;
+                write!(output, "\\u{{{:x}}}", c as u32).expect("writing to String cannot fail");
+            }
+            c => output.push(c),
+        }
+    }
+    output
+}
+
+pub(crate) fn quote_terminal(value: &str, quote: char) -> String {
+    let escaped = escape_terminal(value).replace(quote, &format!("\\{quote}"));
+    format!("{quote}{escaped}{quote}")
+}
+
 pub(crate) fn format_title(title: Option<&str>) -> String {
-    format!("\"{}\"", title.unwrap_or("<untitled>").replace('"', "\\\""))
+    quote_terminal(title.unwrap_or("<untitled>"), '"')
 }
 
 #[cfg(test)]
@@ -94,8 +119,11 @@ mod tests {
     }
 
     #[test]
-    fn title_output_keeps_unicode_format_characters_and_escapes_quotes() {
-        assert_eq!(format_title(Some("\u{200e}example")), "\"\u{200e}example\"");
+    fn title_output_escapes_bidi_controls_and_quotes() {
+        assert_eq!(
+            format_title(Some("\u{200e}example")),
+            "\"\\u{200e}example\""
+        );
         assert_eq!(format_title(Some("a \"quote\"")), "\"a \\\"quote\\\"\"");
     }
 
@@ -161,5 +189,18 @@ mod period_tests {
             "2026-01-01 23:59:00–2026-01-02 00:00:00"
         );
         assert_eq!(format_period(start, start + 30, false), "23:59:00–23:59:30");
+    }
+    #[test]
+    fn terminal_values_cannot_inject_controls_and_keep_normal_unicode() {
+        assert_eq!(
+            escape_terminal("\x1b[31m\n\r\t\x07\x7f\u{009b}\u{202e}"),
+            "\\u{1b}[31m\\n\\r\\t\\u{7}\\u{7f}\\u{9b}\\u{202e}"
+        );
+        assert_eq!(
+            escape_terminal("Привет 👩\u{200d}💻"),
+            "Привет 👩\u{200d}💻"
+        );
+        assert_eq!(quote_terminal("a\\b\"\n", '"'), "\"a\\\\b\\\"\\n\"");
+        assert_eq!(quote_terminal("a'b", '\''), "'a\\'b'");
     }
 }

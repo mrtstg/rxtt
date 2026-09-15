@@ -1,3 +1,4 @@
+use crate::presentation::{escape_terminal, quote_terminal};
 use chrono::{DateTime, Local, SecondsFormat};
 
 use crate::model::{ActivityEvent, ActivityState, WindowInfo};
@@ -6,14 +7,23 @@ use crate::x11::ProbeReport;
 pub fn print_probe(report: &ProbeReport) -> i32 {
     println!("X11 probe");
     println!("---------");
-    println!("XDG_SESSION_TYPE : {}", report.session_type);
-    println!("DISPLAY          : {}", report.display_name);
-    println!("connected display: {}", report.display_name);
+    println!(
+        "XDG_SESSION_TYPE : {}",
+        escape_terminal(&report.session_type)
+    );
+    println!(
+        "DISPLAY          : {}",
+        escape_terminal(&report.display_name)
+    );
+    println!(
+        "connected display: {}",
+        escape_terminal(&report.display_name)
+    );
     println!("screen number    : {}", report.screen_number);
     println!("root window      : 0x{:x}", report.root_window);
     println!(
         "window manager   : {}",
-        report.window_manager.as_deref().unwrap_or("<unknown>")
+        escape_terminal(report.window_manager.as_deref().unwrap_or("<unknown>"))
     );
     println!(
         "_NET_ACTIVE_WINDOW supported: {}",
@@ -38,7 +48,7 @@ pub fn print_probe(report: &ProbeReport) -> i32 {
     } else {
         println!("\nProbe result: WARNING");
         for warning in &report.warnings {
-            println!("- {warning}");
+            println!("- {}", escape_terminal(warning));
         }
         1
     }
@@ -74,7 +84,7 @@ pub fn render_event(event: &ActivityEvent) {
             observed_at,
             ..
         } => print_window_metadata_changed(window, observed_at),
-        ActivityEvent::Status(message) => println!("{message}"),
+        ActivityEvent::Status(message) => println!("{}", escape_terminal(message)),
     }
 }
 
@@ -94,6 +104,7 @@ fn print_interval_start(
     started_at: &DateTime<Local>,
     reason: &str,
 ) {
+    let reason = escape_terminal(reason);
     let time = format_time(started_at);
     if state == ActivityState::Active
         && let Some(window) = window
@@ -124,6 +135,7 @@ fn print_interval_end(
     reason: &str,
 ) {
     let app = window.map(WindowInfo::app_id);
+    let reason = escape_terminal(reason);
     let xid = window.map(|window| format!("0x{:x}", window.window_id));
     println!(
         "INTERVAL {} -> {}  duration={:8.3}s  state={}  app={} xid={}  reason={reason}",
@@ -138,7 +150,7 @@ fn print_interval_end(
 
 pub fn print_window(info: &WindowInfo) {
     println!("window id : 0x{:x}", info.window_id);
-    println!("app id    : {}", info.app_id());
+    println!("app id    : {}", escape_terminal(&info.app_id()));
     println!(
         "WM_CLASS  : instance={}, class={}",
         quoted_option(info.wm_instance.as_deref()),
@@ -158,7 +170,7 @@ fn format_time(time: &DateTime<Local>) -> String {
 }
 
 fn quoted(value: &str) -> String {
-    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+    quote_terminal(value, '\'')
 }
 
 fn quoted_option(value: Option<&str>) -> String {

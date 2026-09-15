@@ -1,3 +1,4 @@
+use crate::presentation::escape_terminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
@@ -164,9 +165,7 @@ impl Tracker {
         if current_window.window_id != window_id {
             return Ok(());
         }
-        let Some(updated_window) = self.source.read_window_info(window_id) else {
-            return Ok(());
-        };
+        let updated_window = self.source.read_window_info(window_id);
         if current_window == &updated_window {
             return Ok(());
         }
@@ -192,6 +191,7 @@ impl Tracker {
             .source
             .subscribe_to_window_title_changes(window.window_id)
         {
+            let error = escape_terminal(&error.to_string());
             eprintln!("WARNING: cannot watch active window title changes: {error}");
         }
     }
