@@ -76,6 +76,19 @@ cargo install --path .
 | `anstyle` | ANSI terminal styling |
 | `nix` (poll) | `poll()` for X11 event loop |
 
+## Autostart
+
+You can add `.desktop` file to `~/.config/autostart/` directory:
+
+```
+[Desktop Entry]
+Type=Application
+Name=RXTT
+Exec=/home/<user>/.cargo/bin/rxtt daemon
+Terminal=false
+```
+
+You can change path depending from where `rxtt` is installed.
 
 
 ## Commands
