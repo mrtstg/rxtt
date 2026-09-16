@@ -401,7 +401,7 @@ Splits each active interval into contiguous title segments. Starts from initial 
 ## Notes
 
 - **Terminal text:** Titles, application identifiers, diagnostic values, and other external text escape terminal control characters and Unicode bidi controls before styling. Newlines, carriage returns, and tabs appear as `\n`, `\r`, and `\t`; other controls appear as `\u{...}`. Backslashes and enclosing quotes are escaped consistently. Ordinary Unicode and emoji remain readable. Stored metadata and JSON values retain their raw text.
-- **X11 metadata limits:** Each title, window-manager name, or `WM_CLASS` property is limited to 64 KiB. Oversized or incorrectly formatted properties are treated as unavailable, not stored as truncated prefixes. Existing fallback paths still apply, such as `WM_NAME` when `_NET_WM_NAME` is unavailable. Scalar window/PID properties accept one 32-bit value; the supported-atom list is limited to 16,384 atoms, with incomplete lists treated as unavailable.
+- **X11 metadata limits:** Each title, window-manager name, or `WM_CLASS` property is limited to 64 KiB. Oversized or incorrectly formatted properties are treated as unavailable, not stored as truncated prefixes. Existing fallback paths still apply, such as `WM_NAME` when `_NET_WM_NAME` is unavailable. Scalar window/PID properties read the first 32-bit value and ignore trailing values for window-manager compatibility; the supported-atom list is limited to 16,384 atoms, with incomplete lists treated as unavailable.
 
 - **WAL mode:** Database readable while daemon runs (concurrent reads safe)
 - **No recovery:** Unfinished intervals on crash are not recovered

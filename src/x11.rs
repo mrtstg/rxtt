@@ -22,7 +22,13 @@ use crate::model::WindowInfo;
 const MAX_PROPERTY_UNITS: u32 = 16_384;
 
 fn valid_property(reply: GetPropertyReply, format: u8, units: u32) -> Option<GetPropertyReply> {
-    (reply.format == format && reply.bytes_after == 0 && reply.value.len() <= units as usize * 4)
+    // Scalar properties use their first value. Some window managers append
+    // another value to _NET_ACTIVE_WINDOW; unread trailing data is harmless.
+    // Text and atom lists must be complete to avoid using truncated metadata.
+    let scalar = format == 32 && units == 1;
+    (reply.format == format
+        && (scalar || reply.bytes_after == 0)
+        && reply.value.len() <= units as usize * 4)
         .then_some(reply)
 }
 
@@ -359,11 +365,23 @@ mod tests {
         assert!(valid_property(reply(8, 0, 65_537), 8, MAX_PROPERTY_UNITS).is_none());
         assert!(valid_property(reply(32, 0, 4), 8, MAX_PROPERTY_UNITS).is_none());
         assert!(valid_property(reply(32, 0, 4), 32, 1).is_some());
-        assert!(valid_property(reply(32, 4, 4), 32, 1).is_none());
+        assert!(valid_property(reply(32, 4, 4), 32, 1).is_some());
         assert!(valid_property(reply(32, 0, 65_536), 32, MAX_PROPERTY_UNITS).is_some());
         let fallback = valid_property(reply(8, 4, 65_536), 8, MAX_PROPERTY_UNITS)
             .and_then(|reply| decode_text(&reply.value))
             .or_else(|| decode_text(b"fallback"));
         assert_eq!(fallback.as_deref(), Some("fallback"));
+    }
+    #[test]
+    fn scalar_property_keeps_first_window_id_with_trailing_data() {
+        let window = 0x0540_0005u32;
+        let reply = GetPropertyReply {
+            format: 32,
+            bytes_after: 4,
+            value: window.to_ne_bytes().to_vec(),
+            ..Default::default()
+        };
+        let reply = valid_property(reply, 32, 1).unwrap();
+        assert_eq!(reply.value32().unwrap().next(), Some(window));
     }
 }
